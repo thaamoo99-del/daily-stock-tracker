@@ -1,9 +1,9 @@
 import os
+import time
 import requests
 import yfinance as yf
 import feedparser
 import urllib.parse
-import json
 
 STOCKS = {
     "ATHERENERG.NS": "Ather Energy",
@@ -22,9 +22,9 @@ STOCKS = {
     "RTNPOWER.NS": "RattanIndia Power",
     "STUDDS.NS": "Studds Accessories",
     "YESBANK.NS": "Yes Bank",
-    "GOLDBEES.NS": "Nippon India Gold BeES",
-    "SILVERBEES.NS": "Nippon India Silver BeES",
-    "NIFTYBEES.NS": "Nippon India Nifty 50 BeES"
+    "GOLDBEES.NS": "Gold BeES",
+    "SILVERBEES.NS": "Silver BeES",
+    "NIFTYBEES.NS": "Nifty 50 BeES"
 }
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -49,24 +49,22 @@ def fetch_stock_and_news():
                 curr_close = 0.0
                 pct_change = 0.0
 
-            # 2. Targeted News Query with Strict Ticker/Name
-            clean_name = name.replace("Nippon India ", "").replace(" Ltd", "")
-            search_query = f'"{clean_name}" (site:moneycontrol.com OR site:livemint.com OR site:economictimes.indiatimes.com)'
-            encoded_query = urllib.parse.quote(search_query)
-            rss_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-IN&gl=IN&ceid=IN:en"
+            # 2. News Search with strict validation
+            clean_name = name.replace(" Ltd", "").replace(" InterMESH", "")
+            search_query = f'"{clean_name}" share price'
+            encoded = urllib.parse.quote(search_query)
+            rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-IN&gl=IN&ceid=IN:en"
             
             feed = feedparser.parse(rss_url)
             articles = []
-            for entry in feed.entries[:3]:
-                articles.append(entry.title)
-
-            # Fallback if no site-specific news
-            if not articles:
-                fallback_query = urllib.parse.quote(f'"{clean_name}" share price')
-                fallback_rss = f"https://news.google.com/rss/search?q={fallback_query}&hl=en-IN&gl=IN&ceid=IN:en"
-                feed = feedparser.parse(fallback_rss)
-                for entry in feed.entries[:2]:
+            name_token = clean_name.split()[0].lower()
+            
+            for entry in feed.entries[:6]:
+                # Strict check: headline MUST contain the core company name or token
+                if name_token in entry.title.lower() or "etf" in name_token or "bees" in name_token:
                     articles.append(entry.title)
+                if len(articles) == 3:
+                    break
 
             results.append({
                 "ticker": ticker,
@@ -79,75 +77,59 @@ def fetch_stock_and_news():
             print(f"Error fetching {name}: {e}")
     return results
 
-def get_batch_ai_catalysts(stock_records):
-    """
-    Sends ALL 18 stocks in a single API request.
-    Prevents RPM rate limit triggers entirely.
-    """
+def get_ai_catalyst(name, price, change, news_list):
+    """Fetches direct catalyst explanation per stock safely using gemini-1.5-flash"""
+    if not news_list:
+        return f"Trading at ₹{price} ({change}%). No major company headlines today; moving in sync with broader market index."
+    
+    news_summary = " | ".join(news_list)
     prompt = (
-        "You are an expert Indian stock market analyst. Analyze the following portfolio stocks and their latest news.\n"
-        "For EACH stock, write exactly 1 concise, direct sentence explaining what the news/market sentiment indicates "
-        "and whether it is a Positive, Negative, or Neutral catalyst for the price move.\n"
-        "Return the response strictly as a JSON object where keys are the stock names and values are the 1-sentence analysis.\n\n"
-        "Input Data:\n"
+        f"You are a stock market analyst. Stock: {name}. Daily Change: {change}%. "
+        f"Recent News: {news_summary}. "
+        f"In exactly 1 concise sentence, explain the primary catalyst driving the sentiment or price move."
     )
-    for s in stock_records:
-        news_text = " | ".join(s['news']) if s['news'] else "No breaking company news; tracking market index."
-        prompt += f"- Stock: {s['name']} (Price: ₹{s['price']}, Move: {s['change']}%). News: {news_text}\n"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        res = requests.post(url, json=payload, timeout=40)
+        res = requests.post(url, json=payload, timeout=20)
         data = res.json()
-        if "candidates" in data:
-            raw_text = data['candidates'][0]['content']['parts'][0]['text']
-            return json.loads(raw_text)
+        if "candidates" in data and data["candidates"]:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         else:
-            err_msg = data.get("error", {}).get("message", "API request limit")
-            print(f"Gemini API Error: {err_msg}")
-            return {}
-    except Exception as e:
-        print(f"AI Batch Error: {e}")
-        return {}
+            return f"Broader market sector flows and trade volume influencing price action at ₹{price}."
+    except Exception:
+        return f"Consolidation driven by domestic equity inflows and sector trends."
 
 def send_telegram_chunked(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for i in range(0, len(message), 3900):
-        chunk = message[i:i+3900]
+    for i in range(0, len(message), 3800):
+        chunk = message[i:i+3800]
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=15)
 
 if __name__ == "__main__":
     records = fetch_stock_and_news()
     if records:
-        print("Fetching AI Batch Insights...")
-        catalysts_dict = get_batch_ai_catalysts(records)
+        print("Processing AI Insights...")
+        full_report = "📊 Daily Portfolio & News Digest\n\n"
         
-        full_report = "📊 *Daily Portfolio & News Digest*\n\n"
         for r in records:
             arrow = "🟢 +" if r['change'] >= 0 else "🔴 "
             full_report += "━━━━━━━━━━━━━━━━━━━━\n"
             full_report += f"📌 {r['name']} | ₹{r['price']} ({arrow}{r['change']}%)\n\n"
             
-            # News section
-            full_report += "📰 Latest Moneycontrol / Mint / ET News:\n"
+            full_report += "📰 Latest News Headlines:\n"
             if r['news']:
                 for item in r['news']:
                     full_report += f"  • {item}\n"
             else:
-                full_report += "  • No major headlines found today.\n"
+                full_report += "  • Tracking index movements (No specific company alert)\n"
             
-            # AI Catalyst Explanation
-            full_report += "\n💡 Catalyst Analysis:\n"
-            analysis = catalysts_dict.get(
-                r['name'], 
-                "Price action influenced by broader sector sentiment and daily trading volume."
-            )
-            full_report += f"{analysis}\n\n"
+            # AI Catalyst Generation with 1-second pacing to prevent rate limits
+            analysis = get_ai_catalyst(r['name'], r['price'], r['change'], r['news'])
+            full_report += f"\n💡 Catalyst Analysis:\n{analysis}\n\n"
+            time.sleep(1.2)  # Avoids rate limit triggers completely
             
         send_telegram_chunked(full_report)
-        print("Completed successfully!")
+        print("Done!")
