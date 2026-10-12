@@ -31,105 +31,101 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-def fetch_stock_and_news():
-    results = []
-    for ticker, name in STOCKS.items():
-        try:
-            # 1. Price Data
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="5d")
-            if len(hist) >= 2:
-                prev_close = hist['Close'].iloc[-2]
-                curr_close = hist['Close'].iloc[-1]
-                pct_change = ((curr_close - prev_close) / prev_close) * 100
-            elif len(hist) == 1:
-                curr_close = hist['Close'].iloc[-1]
-                pct_change = 0.0
-            else:
-                curr_close = 0.0
-                pct_change = 0.0
+def fetch_stock_and_news(ticker, name):
+    try:
+        # Price Data
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="5d")
+        if len(hist) >= 2:
+            prev_close = hist['Close'].iloc[-2]
+            curr_close = hist['Close'].iloc[-1]
+            pct_change = ((curr_close - prev_close) / prev_close) * 100
+        elif len(hist) == 1:
+            curr_close = hist['Close'].iloc[-1]
+            pct_change = 0.0
+        else:
+            curr_close, pct_change = 0.0, 0.0
 
-            # 2. News Search with strict validation
-            clean_name = name.replace(" Ltd", "").replace(" InterMESH", "")
-            search_query = f'"{clean_name}" share price'
-            encoded = urllib.parse.quote(search_query)
-            rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-IN&gl=IN&ceid=IN:en"
-            
-            feed = feedparser.parse(rss_url)
-            articles = []
-            name_token = clean_name.split()[0].lower()
-            
-            for entry in feed.entries[:6]:
-                # Strict check: headline MUST contain the core company name or token
-                if name_token in entry.title.lower() or "etf" in name_token or "bees" in name_token:
-                    articles.append(entry.title)
-                if len(articles) == 3:
-                    break
+        # Exact News Filter
+        clean_name = name.replace(" Ltd", "").replace(" InterMESH", "")
+        search_query = f'"{clean_name}" share price'
+        encoded = urllib.parse.quote(search_query)
+        rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-IN&gl=IN&ceid=IN:en"
+        
+        feed = feedparser.parse(rss_url)
+        articles = []
+        name_token = clean_name.split()[0].lower()
+        
+        for entry in feed.entries[:6]:
+            if name_token in entry.title.lower() or "etf" in name_token or "bees" in name_token:
+                articles.append(entry.title)
+            if len(articles) == 2:
+                break
 
-            results.append({
-                "ticker": ticker,
-                "name": name,
-                "price": round(float(curr_close), 2),
-                "change": round(float(pct_change), 2),
-                "news": articles
-            })
-        except Exception as e:
-            print(f"Error fetching {name}: {e}")
-    return results
+        return {
+            "name": name,
+            "price": round(float(curr_close), 2),
+            "change": round(float(pct_change), 2),
+            "news": articles
+        }
+    except Exception as e:
+        print(f"Error fetching {name}: {e}")
+        return None
 
 def get_ai_catalyst(name, price, change, news_list):
-    """Fetches direct catalyst explanation per stock safely using gemini-1.5-flash"""
     if not news_list:
-        return f"Trading at ₹{price} ({change}%). No major company headlines today; moving in sync with broader market index."
+        return f"Trading at ₹{price} ({change}%). Moving in sync with broader market trend."
     
-    news_summary = " | ".join(news_list)
+    news_text = " | ".join(news_list)
     prompt = (
-        f"You are a stock market analyst. Stock: {name}. Daily Change: {change}%. "
-        f"Recent News: {news_summary}. "
-        f"In exactly 1 concise sentence, explain the primary catalyst driving the sentiment or price move."
+        f"Stock: {name}. Change: {change}%. Price: ₹{price}. "
+        f"Headlines: {news_text}. "
+        f"Explain in exactly 1 direct sentence the core market catalyst behind this move."
     )
-
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        res = requests.post(url, json=payload, timeout=20)
-        data = res.json()
-        if "candidates" in data and data["candidates"]:
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        else:
-            return f"Broader market sector flows and trade volume influencing price action at ₹{price}."
+        res = requests.post(url, json=payload, timeout=20).json()
+        if "candidates" in res and res["candidates"]:
+            return res["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception:
-        return f"Consolidation driven by domestic equity inflows and sector trends."
+        pass
+    return "Consolidation driven by domestic equity inflows and sector trends."
 
-def send_telegram_chunked(message):
+def send_telegram_single(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    for i in range(0, len(message), 3800):
-        chunk = message[i:i+3800]
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": chunk}, timeout=15)
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID, 
+        "text": message
+    }
+    requests.post(url, json=payload, timeout=15)
 
 if __name__ == "__main__":
-    records = fetch_stock_and_news()
-    if records:
-        print("Processing AI Insights...")
-        full_report = "📊 Daily Portfolio & News Digest\n\n"
+    # Starting alert
+    send_telegram_single("📊 Daily Portfolio Updates Starting...")
+    time.sleep(1.5)
+
+    for ticker, name in STOCKS.items():
+        data = fetch_stock_and_news(ticker, name)
+        if not data:
+            continue
+            
+        arrow = "🟢 +" if data['change'] >= 0 else "🔴 "
+        card = f"📌 {data['name']} | ₹{data['price']} ({arrow}{data['change']}%)\n\n"
         
-        for r in records:
-            arrow = "🟢 +" if r['change'] >= 0 else "🔴 "
-            full_report += "━━━━━━━━━━━━━━━━━━━━\n"
-            full_report += f"📌 {r['name']} | ₹{r['price']} ({arrow}{r['change']}%)\n\n"
+        card += "📰 Latest News:\n"
+        if data['news']:
+            for n in data['news']:
+                card += f"  • {n}\n"
+        else:
+            card += "  • No major company alert today.\n"
             
-            full_report += "📰 Latest News Headlines:\n"
-            if r['news']:
-                for item in r['news']:
-                    full_report += f"  • {item}\n"
-            else:
-                full_report += "  • Tracking index movements (No specific company alert)\n"
-            
-            # AI Catalyst Generation with 1-second pacing to prevent rate limits
-            analysis = get_ai_catalyst(r['name'], r['price'], r['change'], r['news'])
-            full_report += f"\n💡 Catalyst Analysis:\n{analysis}\n\n"
-            time.sleep(1.2)  # Avoids rate limit triggers completely
-            
-        send_telegram_chunked(full_report)
-        print("Done!")
+        analysis = get_ai_catalyst(data['name'], data['price'], data['change'], data['news'])
+        card += f"\n💡 Catalyst Analysis:\n{analysis}"
+        
+        # Oru oru stock kum thani message send aagum
+        send_telegram_single(card)
+        time.sleep(1.5)  # Telegram rate limit and Gemini cooldown safe delay
+
+    print("Completed sending individual stock updates!")
