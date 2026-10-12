@@ -4,6 +4,7 @@ import requests
 import yfinance as yf
 import feedparser
 import urllib.parse
+import math
 
 STOCKS = {
     "ATHERENERG.NS": "Ather Energy",
@@ -33,20 +34,29 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
 def fetch_stock_and_news(ticker, name):
     try:
-        # Price Data
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="5d")
+        # 1-month data eduthu NaN values-ai remove panrom
+        hist = stock.history(period="1mo")
+        hist = hist.dropna(subset=['Close'])
+        
+        curr_close = 0.0
+        pct_change = 0.0
+        
         if len(hist) >= 2:
-            prev_close = hist['Close'].iloc[-2]
-            curr_close = hist['Close'].iloc[-1]
-            pct_change = ((curr_close - prev_close) / prev_close) * 100
+            prev_close = float(hist['Close'].iloc[-2])
+            curr_close = float(hist['Close'].iloc[-1])
+            if prev_close > 0:
+                pct_change = ((curr_close - prev_close) / prev_close) * 100
         elif len(hist) == 1:
-            curr_close = hist['Close'].iloc[-1]
+            curr_close = float(hist['Close'].iloc[-1])
             pct_change = 0.0
-        else:
-            curr_close, pct_change = 0.0, 0.0
 
-        # Exact News Filter
+        # Oruvelai innum NaN aaga irundhaal fallback handle panrom
+        if math.isnan(curr_close) or curr_close == 0.0:
+            print(f"Skipping or price unavailable for {name}")
+            return None
+
+        # News Filter
         clean_name = name.replace(" Ltd", "").replace(" InterMESH", "")
         search_query = f'"{clean_name}" share price'
         encoded = urllib.parse.quote(search_query)
@@ -64,8 +74,8 @@ def fetch_stock_and_news(ticker, name):
 
         return {
             "name": name,
-            "price": round(float(curr_close), 2),
-            "change": round(float(pct_change), 2),
+            "price": round(curr_close, 2),
+            "change": round(pct_change, 2),
             "news": articles
         }
     except Exception as e:
@@ -102,12 +112,13 @@ def send_telegram_single(message):
     requests.post(url, json=payload, timeout=15)
 
 if __name__ == "__main__":
-    # Starting alert
     send_telegram_single("📊 Daily Portfolio Updates Starting...")
     time.sleep(1.5)
 
     for ticker, name in STOCKS.items():
         data = fetch_stock_and_news(ticker, name)
+        
+        # Valid price illana antha stock message send aagadhu (NaN thadukkum)
         if not data:
             continue
             
@@ -124,8 +135,7 @@ if __name__ == "__main__":
         analysis = get_ai_catalyst(data['name'], data['price'], data['change'], data['news'])
         card += f"\n💡 Catalyst Analysis:\n{analysis}"
         
-        # Oru oru stock kum thani message send aagum
         send_telegram_single(card)
-        time.sleep(1.5)  # Telegram rate limit and Gemini cooldown safe delay
+        time.sleep(1.5)
 
-    print("Completed sending individual stock updates!")
+    print("Completed sending updates!")
