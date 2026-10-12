@@ -6,6 +6,7 @@ import feedparser
 import urllib.parse
 import math
 
+# NSE Tickers
 STOCKS = {
     "ATHERENERG.NS": "Ather Energy",
     "DRREDDY.NS": "Dr Reddys Laboratories",
@@ -35,28 +36,39 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 def fetch_stock_and_news(ticker, name):
     try:
         stock = yf.Ticker(ticker)
-        # 1-month data eduthu NaN values-ai remove panrom
-        hist = stock.history(period="1mo")
-        hist = hist.dropna(subset=['Close'])
+        curr_price = None
+        prev_close = None
         
-        curr_close = 0.0
-        pct_change = 0.0
-        
-        if len(hist) >= 2:
-            prev_close = float(hist['Close'].iloc[-2])
-            curr_close = float(hist['Close'].iloc[-1])
-            if prev_close > 0:
-                pct_change = ((curr_close - prev_close) / prev_close) * 100
-        elif len(hist) == 1:
-            curr_close = float(hist['Close'].iloc[-1])
-            pct_change = 0.0
+        # Method 1: Official fast_info (Accurate NSE Real-time / Last Traded)
+        try:
+            fast = stock.fast_info
+            curr_price = fast.last_price
+            prev_close = fast.previous_close
+        except Exception:
+            pass
 
-        # Oruvelai innum NaN aaga irundhaal fallback handle panrom
-        if math.isnan(curr_close) or curr_close == 0.0:
-            print(f"Skipping or price unavailable for {name}")
+        # Method 2: Fallback to history only if fast_info fails
+        if not curr_price or math.isnan(curr_price) or curr_price <= 0:
+            hist = stock.history(period="5d", auto_adjust=False)
+            hist = hist.dropna(subset=['Close'])
+            if len(hist) >= 2:
+                curr_price = float(hist['Close'].iloc[-1])
+                prev_close = float(hist['Close'].iloc[-2])
+            elif len(hist) == 1:
+                curr_price = float(hist['Close'].iloc[-1])
+                prev_close = curr_price
+
+        # Sanity check
+        if not curr_price or math.isnan(curr_price) or curr_price <= 0:
+            print(f"Price unavailable for {name}")
             return None
 
-        # News Filter
+        if prev_close and prev_close > 0:
+            pct_change = ((curr_price - prev_close) / prev_close) * 100
+        else:
+            pct_change = 0.0
+
+        # Targeted Fresh News Filter
         clean_name = name.replace(" Ltd", "").replace(" InterMESH", "")
         search_query = f'"{clean_name}" share price'
         encoded = urllib.parse.quote(search_query)
@@ -74,8 +86,8 @@ def fetch_stock_and_news(ticker, name):
 
         return {
             "name": name,
-            "price": round(curr_close, 2),
-            "change": round(pct_change, 2),
+            "price": round(float(curr_price), 2),
+            "change": round(float(pct_change), 2),
             "news": articles
         }
     except Exception as e:
@@ -84,13 +96,13 @@ def fetch_stock_and_news(ticker, name):
 
 def get_ai_catalyst(name, price, change, news_list):
     if not news_list:
-        return f"Trading at ₹{price} ({change}%). Moving in sync with broader market trend."
+        return f"Trading at ₹{price} ({change}%). Moving in line with broader market sentiment."
     
     news_text = " | ".join(news_list)
     prompt = (
-        f"Stock: {name}. Change: {change}%. Price: ₹{price}. "
+        f"You are a financial analyst. Stock: {name}. Daily Move: {change}% (Price: ₹{price}). "
         f"Headlines: {news_text}. "
-        f"Explain in exactly 1 direct sentence the core market catalyst behind this move."
+        f"Write exactly 1 concise sentence explaining the specific reason behind this move."
     )
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -101,7 +113,7 @@ def get_ai_catalyst(name, price, change, news_list):
             return res["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception:
         pass
-    return "Consolidation driven by domestic equity inflows and sector trends."
+    return "Consolidation driven by institutional flows and sectoral performance."
 
 def send_telegram_single(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -117,8 +129,6 @@ if __name__ == "__main__":
 
     for ticker, name in STOCKS.items():
         data = fetch_stock_and_news(ticker, name)
-        
-        # Valid price illana antha stock message send aagadhu (NaN thadukkum)
         if not data:
             continue
             
@@ -138,4 +148,4 @@ if __name__ == "__main__":
         send_telegram_single(card)
         time.sleep(1.5)
 
-    print("Completed sending updates!")
+    print("Completed!")
